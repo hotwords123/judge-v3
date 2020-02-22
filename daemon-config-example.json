@@ -6,5 +6,12 @@
     "TestData": "/opt/syzoj/data/testdata",
     "Priority": 1,
     "DataDisplayLimit": 100,
-    "TempDirectory": "/tmp"
+    "TempDirectory": "/tmp",
+    "Diagnostics": {
+        "Enabled": true,
+        "MaxTimeRatio": 0.2,
+        "MaxMemoryRatio": 0.2,
+        "MaxTime": 200,
+        "MaxMemory": 32
+    }
 }

@@ -12,6 +12,13 @@ export interface ConfigStructure {
     redis: string;
     dataDisplayLimit: number;
     tempDirectory: string;
+    diagnostics: {
+        enabled: boolean;
+        maxTimeRatio: number;
+        maxMemoryRatio: number;
+        maxTime: number;
+        maxMemory: number;
+    }
 }
 
 const optionDefinitions = [
@@ -34,7 +41,14 @@ export const globalConfig: ConfigStructure = {
     priority: configJSON.Priority,
     redis: configJSON.RedisUrl,
     dataDisplayLimit: configJSON.DataDisplayLimit,
-    tempDirectory: configJSON.TempDirectory
+    tempDirectory: configJSON.TempDirectory,
+    diagnostics: {
+        enabled: configJSON.Diagnostics.Enabled,
+        maxTimeRatio: configJSON.Diagnostics.MaxTimeRatio,
+        maxMemoryRatio: configJSON.Diagnostics.MaxMemoryRatio,
+        maxTime: configJSON.Diagnostics.MaxTime,
+        maxMemory: configJSON.Diagnostics.MaxMemory,
+    }
 }
 
 configureWinston(options.verbose);

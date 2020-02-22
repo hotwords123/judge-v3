@@ -86,9 +86,9 @@ export class StandardJudger extends JudgerBase {
             Cfg.diagnostics.maxTime
         );
         const maxMemoryUsage = Math.min(
-            Cfg.diagnostics.maxMemoryRatio * this.parameters.memoryLimit * 1024,
+            Cfg.diagnostics.maxMemoryRatio * this.parameters.memoryLimit,
             Cfg.diagnostics.maxMemory
-        );
+        ) * 1024;
 
         winston.verbose(`Diagnostics limits: time = ${maxTimeUsage}, memory = ${maxMemoryUsage}`);
 

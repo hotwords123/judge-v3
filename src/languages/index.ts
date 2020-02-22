@@ -28,10 +28,15 @@ export interface Language {
     ) => ExecParam;
 }
 
+export const DIAGNOSTICS_NAME_SUFFIX = '@diagnostics';
+
 export const languages: Language[] = [
     require('./cpp'),
     require('./cpp11'),
     require('./cpp17'),
+    require('./diagnostics/cpp'),
+    require('./diagnostics/cpp11'),
+    require('./diagnostics/cpp17'),
     require('./cpp-noilinux'),
     require('./cpp11-noilinux'),
     require('./cpp11-clang'),

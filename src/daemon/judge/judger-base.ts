@@ -1,5 +1,5 @@
 import { TestData, SubtaskScoringType, TestcaseJudge } from '../interfaces';
-import { CompilationResult, JudgeResult, TaskStatus, SubtaskResult, TestcaseDetails } from '../../interfaces';
+import { CompilationResult, JudgeResult, TaskStatus, SubtaskResult, TestcaseDetails, TestcaseResultType } from '../../interfaces';
 import { Language } from '../../languages';
 import { compile } from './compile';
 import winston = require('winston');
@@ -29,6 +29,9 @@ export abstract class JudgerBase {
     async preprocessTestData(): Promise<void> { }
 
     abstract compile(): Promise<CompilationResult>;
+    compileWithDiagnostics(): Promise<CompilationResult> {
+        throw new Error("Diagnostics not supported.");
+    }
 
     async judge(reportProgressResult: (p: JudgeResult) => Promise<void>): Promise<JudgeResult> {
         const results: SubtaskResult[] = this.testData.subtasks.map(t => ({
@@ -139,9 +142,69 @@ export abstract class JudgerBase {
             })());
         }
         await Promise.all(judgeTasks);
+
+        // Let's check whether this submission supports diagnostics first.
+        if (this.supportDiagnostics()) {
+            winston.verbose('Diagnostics supported.');
+            let diagnosticCase: TestcaseJudge = null;
+            let diagnosticDetails: TestcaseDetails = null;
+            loop:
+            // Find if there are suitable cases to run the diagnostics.
+            for (let subtaskIndex = 0; subtaskIndex < this.testData.subtasks.length; ++subtaskIndex) {
+                const currentTask = this.testData.subtasks[subtaskIndex];
+                const currentResult = results[subtaskIndex];
+                for (let index = 0; index < currentTask.cases.length; ++index) {
+                    const currentCase = currentTask.cases[index];
+                    const currentTaskResult = currentResult.cases[index];
+                    const currentTaskDetails = currentTaskResult.result;
+                    // To trigger the diagnostics process:
+                    // - the result type should be Wrong Answer or Runtime Error;
+                    // - the time usage should not exceed 100 ms;
+                    // - the memory usage should not exceed 16 MiB.
+                    if (currentTaskDetails
+                        && [TestcaseResultType.WrongAnswer, TestcaseResultType.RuntimeError].includes(currentTaskDetails.type)
+                        && currentTaskDetails.time <= 100
+                        && currentTaskDetails.memory <= 16 * 1024) {
+                        diagnosticCase = currentCase;
+                        diagnosticDetails = currentTaskDetails;
+                        winston.verbose(`Testcase for diagnostics found: ${subtaskIndex} ${index}`);
+                        break loop;
+                    }
+                }
+            }
+            if (diagnosticCase) {
+                // Now let's start the diagnostics process.
+                winston.verbose("Diagnostics started.");
+                try {
+                    await this.compileWithDiagnostics();
+                    const diagnosticsResult = await this.judgeTestcase(diagnosticCase, async () => {
+                        winston.verbose("Diagnostics started judging.");
+                    });
+                    winston.verbose("Diagnostics ended judging: ", diagnosticsResult);
+                    if (diagnosticsResult.userError) {
+                        winston.verbose("Diagnostics detected stderr.");
+                        diagnosticDetails.diagnostics = diagnosticsResult.userError;
+                        await reportProgress();
+                    } else {
+                        winston.verbose("Diagnostics didn't found any issue.");
+                    }
+                } catch (err) {
+                    // Whether it succeeds does not affect the final result,
+                    // so we just ignore the errors silently.
+                    winston.warn('Diagnostics failed: ', err);
+                }
+            } else {
+                winston.verbose('Testcase for diagnostics not found.');
+            }
+        }
+
         return { subtasks: results };
     }
     protected abstract judgeTestcase(curCase: TestcaseJudge, started: () => Promise<void>): Promise<TestcaseDetails>;
+
+    supportDiagnostics(): boolean {
+        return false;
+    }
 
     async cleanup() { }
 }

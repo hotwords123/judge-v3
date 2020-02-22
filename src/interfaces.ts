@@ -28,6 +28,7 @@ export interface TestcaseDetails {
     userError?: string;
     spjMessage?: string;
     systemMessage?: string;
+    diagnostics?: string;
 };
 
 export interface TestcaseResult {

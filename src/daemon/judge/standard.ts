@@ -3,7 +3,7 @@ import { TaskStatus, ErrorType, TestcaseDetails, CompilationResult, JudgeResult,
 import { globalConfig as Cfg } from '../config';
 import { cloneObject, readFileLength } from '../../utils';
 import { compile } from './compile';
-import { Language, getLanguage } from '../../languages';
+import { Language, getLanguage, DIAGNOSTICS_NAME_SUFFIX } from '../../languages';
 import { runTask } from '../rmq';
 import { JudgerBase } from './judger-base';
 
@@ -54,6 +54,22 @@ export class StandardJudger extends JudgerBase {
         );
         this.userCodeExecuableName = executableName;
         return compilationResult;
+    }
+
+    async compileWithDiagnostics(): Promise<CompilationResult> {
+        const language = getLanguage(this.parameters.language + DIAGNOSTICS_NAME_SUFFIX);
+        const [executableName, compilationResult] = await compile(
+            this.parameters.code,
+            language,
+            this.testData.extraSourceFiles[language.name],
+            this.priority
+        );
+        this.userCodeExecuableName = executableName;
+        return compilationResult;
+    }
+
+    supportDiagnostics(): boolean {
+        return !!getLanguage(this.parameters.language + DIAGNOSTICS_NAME_SUFFIX);
     }
 
     async judgeTestcase(curCase: TestcaseJudge, started: () => Promise<void>): Promise<TestcaseDetails> {

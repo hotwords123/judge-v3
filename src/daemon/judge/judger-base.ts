@@ -1,5 +1,5 @@
-import { TestData, SubtaskScoringType, TestcaseJudge } from '../interfaces';
-import { CompilationResult, JudgeResult, TaskStatus, SubtaskResult, TestcaseDetails } from '../../interfaces';
+import { TestData, SubtaskScoringType, TestcaseJudge, SubtaskJudge } from '../interfaces';
+import { CompilationResult, JudgeResult, TaskStatus, SubtaskResult, TestcaseDetails, TestcaseResultType } from '../../interfaces';
 import { Language } from '../../languages';
 import { compile } from './compile';
 import winston = require('winston');
@@ -35,6 +35,45 @@ export abstract class JudgerBase {
         throw new Error("Diagnostics not supported.");
     }
 
+    // Toposort subtask dependencies.
+    getSubtaskOrder(subtasks: SubtaskJudge[]): number[] {
+        const fatal = (message) => {
+            throw new Error("Misconfigured subtask dependencies: " + message);
+        };
+
+        const queue: number[] = [];
+        const edgesOut: number[][] = subtasks.map(() => []);
+
+        const degreeIn = subtasks.map(({ dependencies }, index) => {
+            if (!Array.isArray(dependencies))
+                fatal("field 'dependencies' must be array");
+
+            for (const from of dependencies) {
+                if (!Number.isInteger(from))
+                    fatal("subtask index must be integer");
+                if (from < 0 || from >= subtasks.length)
+                    fatal("subtask index out of range");
+                edgesOut[from].push(index);
+            }
+
+            if (dependencies.length === 0) queue.push(index);
+            return dependencies.length;
+        });
+
+        for (let head = 0; head < queue.length; head++) {
+            const index = queue[head];
+            for (const to of edgesOut[index]) {
+                degreeIn[to]--;
+                if (0 === degreeIn[to]) queue.push(to);
+            }
+        }
+
+        if (queue.length < subtasks.length)
+            fatal("loop detected");
+
+        return queue;
+    }
+
     async judge(reportProgressResult: (p: JudgeResult) => Promise<void>): Promise<JudgeResult> {
         const results: SubtaskResult[] = this.testData.subtasks.map(t => ({
             cases: t.cases.map(j => ({
@@ -46,7 +85,9 @@ export abstract class JudgerBase {
         this.subtaskResults = results;
 
         const updateSubtaskScore = (currentTask, currentResult) => {
-            if (currentResult.cases.some(c => c.status === TaskStatus.Failed)) {
+            if (currentResult.cases.every(c => c.status === TaskStatus.Skipped)) {
+                currentResult.score = 0;
+            } else if (currentResult.cases.some(c => c.status === TaskStatus.Failed)) {
                 // If any testcase has failed, the score is invaild.
                 currentResult.score = NaN;
             } else {
@@ -77,16 +118,34 @@ export abstract class JudgerBase {
         }
         winston.debug(`Totally ${results.length} subtasks.`);
 
-        const judgeTasks: Promise<void>[] = [];
-        for (let subtaskIndex = 0; subtaskIndex < this.testData.subtasks.length; subtaskIndex++) {
+        const subtaskOrder = this.getSubtaskOrder(this.testData.subtasks);
+        const judgeTasks: Promise<void>[] = new Array(results.length).fill(null);
+
+        for (let subtaskIndex of subtaskOrder) {
             const currentResult = results[subtaskIndex];
             const currentTask = this.testData.subtasks[subtaskIndex];
 
             const updateCurrentSubtaskScore = () => updateSubtaskScore(currentTask, currentResult);
 
-            judgeTasks.push((async () => {
-                // Type minimum is skippable, run one by one
-                if (currentTask.type !== SubtaskScoringType.Summation) {
+            judgeTasks[subtaskIndex] = (async () => {
+                const { dependencies } = currentTask;
+
+                // Wait for dependencies
+                await Promise.all(dependencies.map(index => judgeTasks[index]));
+
+                const shouldSkipAll = dependencies.some(
+                    index => results[index].cases.some(
+                        caseResult => caseResult.result.type !== TestcaseResultType.Accepted
+                ));
+
+                if (shouldSkipAll) {
+                    // Some dependency has failed, skip this subtask
+                    for (let caseResult of currentResult.cases) {
+                        caseResult.status = TaskStatus.Skipped;
+                    }
+                    await reportProgress();
+                } else if (currentTask.type !== SubtaskScoringType.Summation) {
+                    // Type minimum is skippable, run one by one
                     let skipped: boolean = false;
                     for (let index = 0; index < currentTask.cases.length; index++) {
                         const currentTaskResult = currentResult.cases[index];
@@ -142,7 +201,7 @@ export abstract class JudgerBase {
                 }
                 updateCurrentSubtaskScore();
                 winston.verbose(`Subtask ${subtaskIndex}, finished`);
-            })());
+            })();
         }
         await Promise.all(judgeTasks);
 

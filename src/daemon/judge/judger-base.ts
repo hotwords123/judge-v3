@@ -44,19 +44,27 @@ export abstract class JudgerBase {
         const queue: number[] = [];
         const edgesOut: number[][] = subtasks.map(() => []);
 
-        const degreeIn = subtasks.map(({ dependencies }, index) => {
+        const degreeIn = subtasks.map(({ type, dependencies }, index) => {
             if (!Array.isArray(dependencies))
                 fatal("field 'dependencies' must be array");
+            
+            if (dependencies.length > 0) {
+                if (type !== SubtaskScoringType.Minimum)
+                    fatal("subtask with dependencies must have scoring type 'min'");
+            } else {
+                queue.push(index);
+            }
 
             for (const from of dependencies) {
                 if (!Number.isInteger(from))
                     fatal("subtask index must be integer");
                 if (from < 0 || from >= subtasks.length)
                     fatal("subtask index out of range");
+                if (subtasks[from].type !== SubtaskScoringType.Minimum)
+                    fatal("subtask with dependencies must have scoring type 'min'");
                 edgesOut[from].push(index);
             }
 
-            if (dependencies.length === 0) queue.push(index);
             return dependencies.length;
         });
 
@@ -85,9 +93,7 @@ export abstract class JudgerBase {
         this.subtaskResults = results;
 
         const updateSubtaskScore = (currentTask, currentResult) => {
-            if (currentResult.cases.every(c => c.status === TaskStatus.Skipped)) {
-                currentResult.score = 0;
-            } else if (currentResult.cases.some(c => c.status === TaskStatus.Failed)) {
+            if (currentResult.cases.some(c => c.status === TaskStatus.Failed)) {
                 // If any testcase has failed, the score is invaild.
                 currentResult.score = NaN;
             } else {
@@ -121,32 +127,45 @@ export abstract class JudgerBase {
         const subtaskOrder = this.getSubtaskOrder(this.testData.subtasks);
         const judgeTasks: Promise<void>[] = new Array(results.length).fill(null);
 
+        winston.debug('Subtask order: ' + subtaskOrder.join(', '));
+
         for (let subtaskIndex of subtaskOrder) {
             const currentResult = results[subtaskIndex];
             const currentTask = this.testData.subtasks[subtaskIndex];
 
-            const updateCurrentSubtaskScore = () => updateSubtaskScore(currentTask, currentResult);
+            let updateCurrentSubtaskScore = () => updateSubtaskScore(currentTask, currentResult);
 
             judgeTasks[subtaskIndex] = (async () => {
                 const { dependencies } = currentTask;
 
-                // Wait for dependencies
-                await Promise.all(dependencies.map(index => judgeTasks[index]));
+                if (dependencies.length) {
+                    // Wait for dependencies
+                    await Promise.all(dependencies.map(index => judgeTasks[index]));
+                }
 
-                const shouldSkipAll = dependencies.some(
-                    index => results[index].cases.some(
-                        caseResult => caseResult.result.type !== TestcaseResultType.Accepted
-                ));
-
-                if (shouldSkipAll) {
-                    // Some dependency has failed, skip this subtask
-                    for (let caseResult of currentResult.cases) {
-                        caseResult.status = TaskStatus.Skipped;
-                    }
-                    await reportProgress();
-                } else if (currentTask.type !== SubtaskScoringType.Summation) {
+                if (currentTask.type !== SubtaskScoringType.Summation) {
                     // Type minimum is skippable, run one by one
-                    let skipped: boolean = false;
+                    let skipped = false;
+
+                    if (currentTask.type === SubtaskScoringType.Minimum) {
+                        const minRatio = _.min(dependencies.map(index => {
+                            const realScore = results[index].score;
+                            const fullScore = this.testData.subtasks[index].score;
+                            return realScore / fullScore;
+                        }).concat(1));
+                        
+                        const minScore = minRatio * currentTask.score;
+                        if (!(minScore > 0)) skipped = true;
+
+                        winston.debug(`Subtask ${subtaskIndex}: min_score = ${minScore}`);
+
+                        const oldHandler = updateCurrentSubtaskScore;
+                        updateCurrentSubtaskScore = () => {
+                            oldHandler();
+                            currentResult.score = Math.min(currentResult.score, minScore);
+                        };
+                    }
+
                     for (let index = 0; index < currentTask.cases.length; index++) {
                         const currentTaskResult = currentResult.cases[index];
                         if (skipped) {
@@ -200,7 +219,8 @@ export abstract class JudgerBase {
                     await Promise.all(caseTasks);
                 }
                 updateCurrentSubtaskScore();
-                winston.verbose(`Subtask ${subtaskIndex}, finished`);
+                await reportProgress();
+                winston.verbose(`Subtask ${subtaskIndex} finished, score = ${currentTask.score}`);
             })();
         }
         await Promise.all(judgeTasks);

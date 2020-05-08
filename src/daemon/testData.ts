@@ -1,6 +1,7 @@
 import yaml = require('js-yaml');
 import fse = require('fs-extra');
 import pathLib = require('path');
+import _ = require('lodash');
 import { Language, languages, getLanguage } from '../languages';
 import { compareStringByNumber, tryReadFile, filterPath } from '../utils';
 import { SubtaskScoringType, SubtaskJudge, TestcaseJudge, Executable, TestData } from './interfaces';
@@ -46,6 +47,50 @@ async function parseExecutable(src: any, dataPath: string): Promise<Executable> 
     return { sourceCode: await fse.readFile(pathLib.join(dataPath, filterPath(src.fileName)), 'utf8'), language: getLanguage(src.language) };
 }
 
+// Deal with subtask dependencies.
+function resolveSubtaskDependencies(subtasks: SubtaskJudge[], edgesIn: number[][]): void {
+    const fatal = (message) => {
+        throw new Error("Misconfigured subtask dependencies: " + message);
+    };
+
+    const queue: number[] = [];
+    const edgesOut: number[][] = subtasks.map(() => []);
+
+    const degreeIn = edgesIn.map((edges, index) => {
+        if (!Array.isArray(edges))
+            fatal("field 'dependencies' must be array or null");
+
+        for (const from of edges) {
+            if (!Number.isInteger(from))
+                fatal("subtask index must be integer");
+            if (from < 0 || from >= subtasks.length)
+                fatal("subtask index out of range");
+            edgesOut[from].push(index);
+        }
+
+        if (edges.length === 0)
+            queue.push(index);
+
+        return edges.length;
+    });
+
+    for (let head = 0; head < queue.length; head++) {
+        const index = queue[head];
+        const subtask = subtasks[index];
+        const extraCases: TestcaseJudge[] = _.flatten(edgesIn[index].map(from => subtasks[from].cases));
+
+        subtask.cases = _.union(extraCases, subtask.cases);
+
+        for (const to of edgesOut[index]) {
+            degreeIn[to] -= 1;
+            if (0 === degreeIn[to]) queue.push(to);
+        }
+    }
+
+    if (queue.length < subtasks.length)
+        fatal("loop detected");
+}
+
 async function parseYamlContent(obj: UserConfigFile, dataName: string): Promise<TestData> {
     const dataPath = pathLib.join(Cfg.testDataDirectory, dataName);
     let extraFiles: { [language: string]: FileContent[] } = {};
@@ -60,18 +105,24 @@ async function parseYamlContent(obj: UserConfigFile, dataName: string): Promise<
             }
         }
     }
+
+    const subtasks = obj.subtasks.map(s => ({
+        score: s.score,
+        type: parseScoringType(s.type),
+        cases: s.cases.map(c => ({
+            input: obj.inputFile ? filterPath(obj.inputFile.replace('#', c.toString())) : null,
+            output: obj.outputFile ? filterPath(obj.outputFile.replace('#', c.toString())) : null,
+            userOutputFile: obj.userOutput ? filterPath(obj.userOutput.replace('#', c.toString())) : null,
+            name: c.toString()
+        }))
+    }));
+
+    resolveSubtaskDependencies(subtasks, obj.subtasks.map(
+        s => (s.dependencies || []).map(index => index - 1)
+    ));
+
     return {
-        subtasks: obj.subtasks.map(s => ({
-            score: s.score,
-            type: parseScoringType(s.type),
-            dependencies: (s.dependencies || []).map(index => index - 1),
-            cases: s.cases.map(c => ({
-                input: obj.inputFile ? filterPath(obj.inputFile.replace('#', c.toString())) : null,
-                output: obj.outputFile ? filterPath(obj.outputFile.replace('#', c.toString())) : null,
-                userOutputFile: obj.userOutput ? filterPath(obj.userOutput.replace('#', c.toString())) : null,
-                name: c.toString()
-            }))
-        })),
+        subtasks,
         spj: obj.specialJudge && await parseExecutable(obj.specialJudge, dataPath),
         extraSourceFiles: extraFiles,
         interactor: obj.interactor && await parseExecutable(obj.interactor, dataPath),
@@ -134,7 +185,6 @@ export async function readRulesFile(dataName: string): Promise<TestData> {
         return !cases.length ? null : {
             subtasks: [{
                 score: 100,
-                dependencies: [],
                 type: SubtaskScoringType.Summation,
                 cases: cases
             }],

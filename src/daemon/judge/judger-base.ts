@@ -1,5 +1,5 @@
-import { TestData, SubtaskScoringType, TestcaseJudge, SubtaskJudge } from '../interfaces';
-import { CompilationResult, JudgeResult, TaskStatus, SubtaskResult, TestcaseDetails, TestcaseResultType } from '../../interfaces';
+import { TestData, SubtaskScoringType, TestcaseJudge } from '../interfaces';
+import { CompilationResult, JudgeResult, TaskStatus, SubtaskResult, TestcaseDetails } from '../../interfaces';
 import { Language } from '../../languages';
 import { compile } from './compile';
 import winston = require('winston');
@@ -35,53 +35,6 @@ export abstract class JudgerBase {
         throw new Error("Diagnostics not supported.");
     }
 
-    // Toposort subtask dependencies.
-    getSubtaskOrder(subtasks: SubtaskJudge[]): number[] {
-        const fatal = (message) => {
-            throw new Error("Misconfigured subtask dependencies: " + message);
-        };
-
-        const queue: number[] = [];
-        const edgesOut: number[][] = subtasks.map(() => []);
-
-        const degreeIn = subtasks.map(({ type, dependencies }, index) => {
-            if (!Array.isArray(dependencies))
-                fatal("field 'dependencies' must be array");
-            
-            if (dependencies.length > 0) {
-                if (type !== SubtaskScoringType.Minimum)
-                    fatal("subtask with dependencies must have scoring type 'min'");
-            } else {
-                queue.push(index);
-            }
-
-            for (const from of dependencies) {
-                if (!Number.isInteger(from))
-                    fatal("subtask index must be integer");
-                if (from < 0 || from >= subtasks.length)
-                    fatal("subtask index out of range");
-                if (subtasks[from].type !== SubtaskScoringType.Minimum)
-                    fatal("subtask with dependencies must have scoring type 'min'");
-                edgesOut[from].push(index);
-            }
-
-            return dependencies.length;
-        });
-
-        for (let head = 0; head < queue.length; head++) {
-            const index = queue[head];
-            for (const to of edgesOut[index]) {
-                degreeIn[to]--;
-                if (0 === degreeIn[to]) queue.push(to);
-            }
-        }
-
-        if (queue.length < subtasks.length)
-            fatal("loop detected");
-
-        return queue;
-    }
-
     async judge(reportProgressResult: (p: JudgeResult) => Promise<void>): Promise<JudgeResult> {
         const results: SubtaskResult[] = this.testData.subtasks.map(t => ({
             cases: t.cases.map(j => ({
@@ -101,16 +54,16 @@ export abstract class JudgerBase {
             }
         }
 
-        const testcaseDetailsCache: Map<string, TestcaseDetails> = new Map();
-        const judgeTestcaseWrapper = async (curCase: TestcaseJudge, started: () => Promise<void>): Promise<TestcaseDetails> => {
-            if (testcaseDetailsCache.has(curCase.name)) {
-                return testcaseDetailsCache.get(curCase.name);
+        const testcaseTasksCache: Map<string, Promise<TestcaseDetails>> = new Map();
+        const judgeTestcaseWrapper = (curCase: TestcaseJudge, started: () => Promise<void>): Promise<TestcaseDetails> => {
+            if (testcaseTasksCache.has(curCase.name)) {
+                return testcaseTasksCache.get(curCase.name);
             }
 
-            const result: TestcaseDetails = await this.judgeTestcase(curCase, started);
-            testcaseDetailsCache.set(curCase.name, result);
+            const task = this.judgeTestcase(curCase, started);
+            testcaseTasksCache.set(curCase.name, task);
 
-            return result;
+            return task;
         }
 
         for (let subtaskIndex = 0; subtaskIndex < this.testData.subtasks.length; subtaskIndex++) {
@@ -124,48 +77,17 @@ export abstract class JudgerBase {
         }
         winston.debug(`Totally ${results.length} subtasks.`);
 
-        const subtaskOrder = this.getSubtaskOrder(this.testData.subtasks);
-        const judgeTasks: Promise<void>[] = new Array(results.length).fill(null);
-
-        winston.debug('Subtask order: ' + subtaskOrder.join(', '));
-
-        for (let subtaskIndex of subtaskOrder) {
+        const judgeTasks: Promise<void>[] = [];
+        for (let subtaskIndex = 0; subtaskIndex < this.testData.subtasks.length; subtaskIndex++) {
             const currentResult = results[subtaskIndex];
             const currentTask = this.testData.subtasks[subtaskIndex];
 
-            let updateCurrentSubtaskScore = () => updateSubtaskScore(currentTask, currentResult);
+            const updateCurrentSubtaskScore = () => updateSubtaskScore(currentTask, currentResult);
 
-            judgeTasks[subtaskIndex] = (async () => {
-                const { dependencies } = currentTask;
-
-                if (dependencies.length) {
-                    // Wait for dependencies
-                    await Promise.all(dependencies.map(index => judgeTasks[index]));
-                }
-
+            judgeTasks.push((async () => {
+                // Type minimum is skippable, run one by one
                 if (currentTask.type !== SubtaskScoringType.Summation) {
-                    // Type minimum is skippable, run one by one
-                    let skipped = false;
-
-                    if (currentTask.type === SubtaskScoringType.Minimum) {
-                        const minRatio = _.min(dependencies.map(index => {
-                            const realScore = results[index].score;
-                            const fullScore = this.testData.subtasks[index].score;
-                            return realScore / fullScore;
-                        }).concat(1));
-                        
-                        const minScore = minRatio * currentTask.score;
-                        if (!(minScore > 0)) skipped = true;
-
-                        winston.debug(`Subtask ${subtaskIndex}: min_score = ${minScore}`);
-
-                        const oldHandler = updateCurrentSubtaskScore;
-                        updateCurrentSubtaskScore = () => {
-                            oldHandler();
-                            currentResult.score = Math.min(currentResult.score, minScore);
-                        };
-                    }
-
+                    let skipped: boolean = false;
                     for (let index = 0; index < currentTask.cases.length; index++) {
                         const currentTaskResult = currentResult.cases[index];
                         if (skipped) {
@@ -219,9 +141,8 @@ export abstract class JudgerBase {
                     await Promise.all(caseTasks);
                 }
                 updateCurrentSubtaskScore();
-                await reportProgress();
-                winston.verbose(`Subtask ${subtaskIndex} finished, score = ${currentTask.score}`);
-            })();
+                winston.verbose(`Subtask ${subtaskIndex}, finished`);
+            })());
         }
         await Promise.all(judgeTasks);
 
